@@ -1,9 +1,10 @@
 use std::{
     fs::read_to_string,
-    io::{stdin, BufRead, Stdin, Write},
+    io::{stdin, BufRead, Write},
     process::{Command, Stdio},
 };
 
+#[derive(PartialEq)]
 enum Optimization {
     O0,
     O1,

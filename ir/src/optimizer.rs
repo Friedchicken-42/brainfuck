@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use crate::parser::{Ast, Expression};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum IRExpr {
     Set(i32),
     Update(i32),
@@ -13,7 +15,7 @@ pub enum IRExpr {
 
 pub type IR = Vec<IRExpr>;
 
-fn convert(ast: Ast, call_stack: &mut u32) -> IR {
+pub fn convert(ast: Ast, call_stack: &mut u32) -> IR {
     let mut arr = vec![];
 
     for expr in ast.0 {
@@ -75,10 +77,73 @@ fn replace(mut ir: IR, rule: &Rule) -> (IR, bool) {
     (ir, updated)
 }
 
-pub fn optimize(ast: Ast) -> IR {
-    let mut call_stack = 0;
-    let mut ir = convert(ast, &mut call_stack);
+fn access_analysis(ir: IR) -> (IR, bool) {
+    let mut updated = false;
+    let mut accesses = HashMap::new();
+    let mut new_ir = Vec::with_capacity(ir.len());
 
+    let mut step = 0;
+
+    for (index, expr) in ir.into_iter().enumerate() {
+        let (index, expr) = match expr {
+            IRExpr::Input
+            | IRExpr::Output
+            | IRExpr::ConditionalStart(_)
+            | IRExpr::ConditionalEnd(_) => {
+                step = 0;
+                accesses.clear();
+                (index, expr)
+            }
+            IRExpr::Step(s) => {
+                step += s;
+                (index, expr)
+            }
+            IRExpr::Set(_) | IRExpr::Update(_) => {
+                if let Some(old_index) = accesses.get_mut(&step) {
+                    updated = true;
+                    let current = *old_index;
+                    *old_index += 1;
+                    (current + 1, expr)
+                } else {
+                    accesses.insert(step, index);
+                    (index, expr)
+                }
+            }
+        };
+        new_ir.insert(index, expr);
+    }
+
+    (new_ir, updated)
+}
+
+fn unreachable_branch(ir: IR) -> (IR, bool) {
+    let mut updated = false;
+    let mut new_ir = Vec::with_capacity(ir.len());
+    let mut remove = None;
+
+    for expr in ir {
+        match (new_ir.last(), &expr) {
+            (Some(IRExpr::ConditionalEnd(_)), IRExpr::ConditionalStart(id))
+            | (Some(IRExpr::Set(0)), IRExpr::ConditionalStart(id)) => {
+                updated = true;
+                remove = Some(*id);
+            }
+            _ => {}
+        }
+
+        if let Some(r) = remove {
+            if expr == IRExpr::ConditionalEnd(r) {
+                remove = None;
+            }
+        } else {
+            new_ir.push(expr);
+        }
+    }
+
+    (new_ir, updated)
+}
+
+pub fn optimize(mut ir: IR) -> IR {
     let rules = [
         Rule {
             replace: |slice| match slice {
@@ -144,6 +209,12 @@ pub fn optimize(ast: Ast) -> IR {
             (ir, changed) = replace(ir, rule);
             updated |= changed;
         }
+
+        let mut changed;
+        (ir, changed) = access_analysis(ir);
+        updated |= changed;
+        (ir, changed) = unreachable_branch(ir);
+        updated |= changed;
 
         if !updated {
             break;

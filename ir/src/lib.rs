@@ -11,7 +11,7 @@ use std::{
 
 use codegen::generate_code;
 use lexer::parse;
-use optimizer::optimize;
+use optimizer::{convert, optimize};
 use parser::generate_ast;
 
 pub fn compile(input: String) -> Result<(), String> {
@@ -23,7 +23,10 @@ pub fn compile(input: String) -> Result<(), String> {
 
     let ast = generate_ast(&mut opcodes)?;
 
-    let ir = optimize(ast);
+    let mut call_stack = 0;
+    let ir = convert(ast, &mut call_stack);
+
+    let ir = optimize(ir);
 
     let file = File::create("code.s").unwrap();
     let mut f = BufWriter::new(file);
