@@ -8,6 +8,7 @@ use std::{
 enum Optimization {
     O0,
     O1,
+    O2,
 }
 
 fn main() -> Result<(), String> {
@@ -22,31 +23,44 @@ fn main() -> Result<(), String> {
     }?;
 
     let optimization = {
-        if args.contains(&"-O0".to_owned()) && args.contains(&"-O1".to_owned()) {
-            Err("multiple optimization specified".to_string())
-        } else if args.contains(&"-O0".to_owned()) {
-            Ok(Optimization::O0)
-        } else if args.contains(&"-O1".to_owned()) {
-            Ok(Optimization::O1)
-        } else {
-            Ok(Optimization::O0)
+        let optimizations = args
+            .iter()
+            .filter(|arg| arg.starts_with("-O"))
+            .map(|arg| arg.as_ref())
+            .collect::<Vec<_>>();
+
+        match optimizations[..] {
+            [] => Ok(Optimization::O0),
+            ["-O0"] => Ok(Optimization::O0),
+            ["-O1"] => Ok(Optimization::O1),
+            ["-O2"] => Ok(Optimization::O2),
+            [opt] => Err(format!("unsuppoted optimization: {opt:?}")),
+            _ => Err("multiple optimization specified".to_string()),
         }
     }?;
 
     match optimization {
         Optimization::O0 => base::compile(data),
         Optimization::O1 => ir::compile(data),
+        Optimization::O2 => llvm::compile(data),
     }?;
 
-    Command::new("nasm")
-        .args(["-g", "-f elf64", "code.s"])
-        .status()
-        .map_err(|e| format!("nasm: {e:?}"))?;
+    if optimization == Optimization::O0 || optimization == Optimization::O1 {
+        Command::new("nasm")
+            .args(["-g", "-f elf64", "code.s"])
+            .status()
+            .map_err(|e| format!("nasm: {e:?}"))?;
 
-    Command::new("ld")
-        .args(["-ocode", "code.o"])
-        .status()
-        .map_err(|e| format!("ld: {e:?}"))?;
+        Command::new("ld")
+            .args(["-ocode", "code.o"])
+            .status()
+            .map_err(|e| format!("ld: {e:?}"))?;
+    } else {
+        Command::new("gcc")
+            .args(["-o", "code", "code.s"])
+            .status()
+            .map_err(|e| format!("gcc: {e:?}"))?;
+    }
 
     let mut input = String::new();
 

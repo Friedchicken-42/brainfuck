@@ -204,13 +204,12 @@ pub fn optimize(mut ir: IR) -> IR {
 
     loop {
         let mut updated = false;
+        let mut changed;
         for rule in &rules {
-            let changed;
             (ir, changed) = replace(ir, rule);
             updated |= changed;
         }
 
-        let mut changed;
         (ir, changed) = access_analysis(ir);
         updated |= changed;
         (ir, changed) = unreachable_branch(ir);

@@ -4,7 +4,6 @@ use std::{
     io::{BufWriter, Write},
 };
 
-// + - > < , . [ ]
 #[derive(Debug)]
 enum Opcode {
     Plus,

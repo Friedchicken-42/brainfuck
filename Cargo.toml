@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 base = { version = "0.1.0", path = "base" }
 ir = { version = "0.1.0", path = "ir" }
+llvm = { version = "0.1.0", path = "llvm" }
