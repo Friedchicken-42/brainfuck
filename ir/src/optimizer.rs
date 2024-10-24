@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Debug};
 
 use crate::parser::{Ast, Expression};
 
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub enum IRExpr {
     Set(i32),
     Update(i32),
@@ -11,6 +11,28 @@ pub enum IRExpr {
     Output,
     ConditionalStart(u32),
     ConditionalEnd(u32),
+}
+
+impl Debug for IRExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Set(arg0) => write!(f, "={arg0}"),
+            Self::Update(arg0) => match *arg0 {
+                0 => write!(f, "+0"),
+                x if x > 0 => write!(f, "+{x}"),
+                x if x < 0 => write!(f, "{x}"),
+                _ => unreachable!(),
+            },
+            Self::Step(arg0) => match *arg0 {
+                x if x >= 0 => write!(f, ">{x}"),
+                x => write!(f, "<{}", x.abs()),
+            },
+            Self::Input => write!(f, ","),
+            Self::Output => write!(f, "."),
+            Self::ConditionalStart(arg0) => write!(f, "[({arg0})"),
+            Self::ConditionalEnd(arg0) => write!(f, "]({arg0})"),
+        }
+    }
 }
 
 pub type IR = Vec<IRExpr>;
@@ -143,7 +165,7 @@ fn unreachable_branch(ir: IR) -> (IR, bool) {
     (new_ir, updated)
 }
 
-pub fn optimize(mut ir: IR) -> IR {
+fn simple_rules(mut ir: IR) -> (IR, bool) {
     let rules = [
         Rule {
             replace: |slice| match slice {
@@ -202,18 +224,30 @@ pub fn optimize(mut ir: IR) -> IR {
         },
     ];
 
+    let mut updated = false;
+
+    for rule in &rules {
+        let changed;
+        (ir, changed) = replace(ir, rule);
+        updated |= changed;
+    }
+
+    (ir, updated)
+}
+
+pub fn optimize(mut ir: IR) -> IR {
     loop {
         let mut updated = false;
         let mut changed;
-        for rule in &rules {
-            (ir, changed) = replace(ir, rule);
-            updated |= changed;
-        }
 
+        (ir, changed) = simple_rules(ir);
+        updated |= changed;
         (ir, changed) = access_analysis(ir);
         updated |= changed;
         (ir, changed) = unreachable_branch(ir);
         updated |= changed;
+
+        println!("{ir:?}");
 
         if !updated {
             break;
@@ -221,4 +255,30 @@ pub fn optimize(mut ir: IR) -> IR {
     }
 
     ir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{access_analysis, simple_rules, IRExpr};
+
+    #[test]
+    fn access_analysis_test() {
+        let ir = vec![
+            IRExpr::Step(1),
+            IRExpr::Update(2),
+            IRExpr::Step(-1),
+            IRExpr::Update(2),
+            IRExpr::Step(1),
+            IRExpr::Update(2),
+            IRExpr::Step(-1),
+            IRExpr::Update(2),
+            IRExpr::Step(1),
+        ];
+
+        // update(4), step(1), update(4)
+        let (out, _) = access_analysis(ir);
+        let (out, _) = simple_rules(out);
+
+        println!("{out:?}");
+    }
 }
