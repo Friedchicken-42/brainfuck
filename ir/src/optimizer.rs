@@ -100,40 +100,71 @@ fn replace(mut ir: IR, rule: &Rule) -> (IR, bool) {
 }
 
 fn access_analysis(ir: IR) -> (IR, bool) {
+    fn reorder(accesses: &HashMap<i32, usize>, mut ir: IR, start: i32, end: i32) -> IR {
+        let mut keys = accesses.keys().collect::<Vec<_>>();
+        keys.sort();
+        keys.reverse();
+
+        for pair in keys.windows(2) {
+            if let [to, from] = pair {
+                let index = accesses[*from];
+                let expr = IRExpr::Step(*to - *from);
+                ir.insert(index, expr);
+            }
+        }
+
+        ir.insert(0, IRExpr::Step(*keys.last().unwrap() - start));
+        ir.push(IRExpr::Step(end - *keys[0]));
+
+        ir
+    }
+
     let mut updated = false;
     let mut accesses = HashMap::new();
     let mut new_ir = Vec::with_capacity(ir.len());
+    let mut temp = vec![];
 
-    let mut step = 0;
+    let mut start_step = 0;
+    let mut current_step = 0;
 
-    for (index, expr) in ir.into_iter().enumerate() {
-        let (index, expr) = match expr {
+    for expr in ir {
+        match expr {
+            IRExpr::Step(s) => {
+                current_step += s;
+            }
+            IRExpr::Set(_) | IRExpr::Update(_) => {
+                let mut before = 0;
+
+                for (k, v) in accesses.iter() {
+                    if *k < current_step {
+                        before = *v;
+                    }
+                }
+                accesses.entry(current_step).or_insert(before);
+                temp.insert(accesses[&current_step], expr);
+
+                for (k, v) in accesses.iter_mut() {
+                    if *k >= current_step {
+                        *v += 1;
+                    }
+                }
+            }
             IRExpr::Input
             | IRExpr::Output
             | IRExpr::ConditionalStart(_)
             | IRExpr::ConditionalEnd(_) => {
-                step = 0;
+                let out = reorder(&accesses, temp, start_step, current_step);
                 accesses.clear();
-                (index, expr)
+                temp = vec![];
+                start_step = current_step;
+                new_ir.extend(out);
+                new_ir.push(expr);
             }
-            IRExpr::Step(s) => {
-                step += s;
-                (index, expr)
-            }
-            IRExpr::Set(_) | IRExpr::Update(_) => {
-                if let Some(old_index) = accesses.get_mut(&step) {
-                    updated = true;
-                    let current = *old_index;
-                    *old_index += 1;
-                    (current + 1, expr)
-                } else {
-                    accesses.insert(step, index);
-                    (index, expr)
-                }
-            }
-        };
-        new_ir.insert(index, expr);
+        }
     }
+
+    let out = reorder(&accesses, temp, start_step, current_step);
+    new_ir.extend(out);
 
     (new_ir, updated)
 }
@@ -235,31 +266,180 @@ fn simple_rules(mut ir: IR) -> (IR, bool) {
     (ir, updated)
 }
 
-pub fn optimize(mut ir: IR) -> IR {
-    loop {
-        let mut updated = false;
-        let mut changed;
+type Optimization = fn(IR) -> (IR, bool);
 
-        (ir, changed) = simple_rules(ir);
-        updated |= changed;
-        (ir, changed) = access_analysis(ir);
-        updated |= changed;
-        (ir, changed) = unreachable_branch(ir);
-        updated |= changed;
+fn optimize_(mut ir: IR, functions: &[Optimization]) -> IR {
+    for function in functions {
+        loop {
+            let mut updated = false;
+            let changed;
 
-        println!("{ir:?}");
+            (ir, changed) = function(ir);
+            updated |= changed;
 
-        if !updated {
-            break;
+            if !updated {
+                break;
+            }
         }
     }
 
     ir
 }
 
+pub fn optimize(ir: IR) -> IR {
+    optimize_(ir, &[simple_rules, unreachable_branch])
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{access_analysis, simple_rules, IRExpr};
+    use crate::optimizer::{access_analysis, optimize_, simple_rules};
+
+    use super::{unreachable_branch, IRExpr};
+
+    #[test]
+    fn set_zero() {
+        let ir = vec![
+            IRExpr::Update(1),
+            IRExpr::ConditionalStart(0),
+            IRExpr::Update(-1),
+            IRExpr::ConditionalEnd(0),
+            IRExpr::Update(2),
+        ];
+
+        let out = optimize_(ir, &[simple_rules]);
+
+        assert_eq!(out, vec![IRExpr::Set(2)]);
+    }
+
+    #[test]
+    fn multiply() {
+        let ir = vec![
+            IRExpr::Update(10),
+            IRExpr::ConditionalStart(0),
+            IRExpr::Step(1),
+            IRExpr::Update(10),
+            IRExpr::Step(-1),
+            IRExpr::Update(-1),
+            IRExpr::ConditionalEnd(0),
+        ];
+
+        let out = optimize_(ir, &[simple_rules]);
+
+        assert_eq!(
+            out,
+            vec![
+                IRExpr::Step(1),
+                IRExpr::Update(100),
+                IRExpr::Step(-1),
+                IRExpr::Set(0)
+            ]
+        );
+    }
+
+    #[test]
+    fn rules_should_work_in_branch() {
+        let ir = vec![
+            IRExpr::Update(1),
+            IRExpr::ConditionalStart(0),
+            IRExpr::Update(1),
+            IRExpr::Update(2),
+            IRExpr::Update(3),
+            IRExpr::ConditionalEnd(0),
+            IRExpr::Update(1),
+            IRExpr::ConditionalStart(1),
+            IRExpr::Update(1),
+            IRExpr::Update(2),
+            IRExpr::Update(3),
+            IRExpr::ConditionalEnd(1),
+        ];
+
+        let out = optimize_(ir, &[simple_rules]);
+
+        assert_eq!(
+            out,
+            vec![
+                IRExpr::Update(1),
+                IRExpr::ConditionalStart(0),
+                IRExpr::Update(6),
+                IRExpr::ConditionalEnd(0),
+                IRExpr::Update(1),
+                IRExpr::ConditionalStart(1),
+                IRExpr::Update(6),
+                IRExpr::ConditionalEnd(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn unreachable_conditional() {
+        let ir = vec![
+            IRExpr::Update(1),
+            IRExpr::ConditionalStart(0),
+            IRExpr::Update(1),
+            IRExpr::Step(1),
+            IRExpr::ConditionalEnd(0),
+            IRExpr::ConditionalStart(1),
+            IRExpr::Update(1),
+            IRExpr::Step(1),
+            IRExpr::ConditionalEnd(1),
+        ];
+
+        let out = optimize_(ir, &[unreachable_branch]);
+
+        assert_eq!(
+            out,
+            vec![
+                IRExpr::Update(1),
+                IRExpr::ConditionalStart(0),
+                IRExpr::Update(1),
+                IRExpr::Step(1),
+                IRExpr::ConditionalEnd(0),
+            ]
+        );
+    }
+
+    #[test]
+    fn unreachable_set() {
+        let ir = vec![
+            IRExpr::Set(0),
+            IRExpr::ConditionalStart(0),
+            IRExpr::Update(1),
+            IRExpr::Step(1),
+            IRExpr::ConditionalEnd(0),
+        ];
+
+        let out = optimize_(ir, &[unreachable_branch]);
+
+        assert_eq!(out, vec![IRExpr::Set(0)]);
+    }
+
+    #[test]
+    fn unreachable_inner() {
+        let ir = vec![
+            IRExpr::Set(1),
+            IRExpr::ConditionalStart(0),
+            IRExpr::Output,
+            IRExpr::Set(0),
+            IRExpr::ConditionalStart(1),
+            IRExpr::Update(1),
+            IRExpr::Step(1),
+            IRExpr::ConditionalEnd(1),
+            IRExpr::ConditionalEnd(0),
+        ];
+
+        let out = optimize_(ir, &[unreachable_branch]);
+
+        assert_eq!(
+            out,
+            vec![
+                IRExpr::Set(1),
+                IRExpr::ConditionalStart(0),
+                IRExpr::Output,
+                IRExpr::Set(0),
+                IRExpr::ConditionalEnd(0),
+            ]
+        );
+    }
 
     #[test]
     fn access_analysis_test() {
@@ -272,13 +452,65 @@ mod tests {
             IRExpr::Update(2),
             IRExpr::Step(-1),
             IRExpr::Update(2),
-            IRExpr::Step(1),
+            IRExpr::Step(2),
         ];
 
-        // update(4), step(1), update(4)
         let (out, _) = access_analysis(ir);
         let (out, _) = simple_rules(out);
 
-        println!("{out:?}");
+        assert_eq!(
+            out,
+            vec![
+                IRExpr::Update(4),
+                IRExpr::Step(1),
+                IRExpr::Update(4),
+                IRExpr::Step(1)
+            ]
+        );
+    }
+    #[test]
+    fn access_analysis_conditional_test() {
+        let ir = vec![
+            IRExpr::Step(1),
+            IRExpr::Update(2),
+            IRExpr::Step(-1),
+            IRExpr::Update(2),
+            IRExpr::Step(1),
+            IRExpr::Update(2),
+            IRExpr::Step(-1),
+            IRExpr::Update(2),
+            IRExpr::Step(1),
+            IRExpr::ConditionalStart(1),
+            IRExpr::Update(1),
+            IRExpr::Step(-2),
+            IRExpr::Update(1),
+            IRExpr::Step(1),
+            IRExpr::Update(1),
+            IRExpr::Step(1),
+            IRExpr::Update(1),
+            IRExpr::ConditionalEnd(1),
+            IRExpr::Update(10),
+        ];
+
+        let (out, _) = access_analysis(ir);
+        let (out, _) = simple_rules(out);
+
+        assert_eq!(
+            out,
+            vec![
+                IRExpr::Update(4),
+                IRExpr::Step(1),
+                IRExpr::Update(4),
+                IRExpr::ConditionalStart(1),
+                IRExpr::Step(-2),
+                IRExpr::Update(1),
+                IRExpr::Step(1),
+                IRExpr::Update(1),
+                IRExpr::Step(1),
+                IRExpr::Update(2),
+                IRExpr::ConditionalEnd(1),
+                IRExpr::Update(10),
+            ]
+        );
     }
 }
